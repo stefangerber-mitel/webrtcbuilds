@@ -155,6 +155,24 @@ function checkout() {
       ;;
     esac
   fi
+  
+  local prev_revision=$(cat $outdir/.webrtcbuilds_revision 2>/dev/null)
+  if [[ -n "$prev_revision" && "$revision" != "$prev_revision" ]]; then
+    # Clear if revisions don't match
+    echo "The revisions do not match. We need to fetch new sources... Do you want to continue? (y/N)"
+    read decision_var
+    if [[ "$decision_var" != "y" ]]; then
+      echo "Aborting..."
+      exit
+    fi
+    echo "Removing old source folder..."
+    rm -rf src .gclient* .webrtcbuilds_*
+  elif [[ -n "$prev_revision" && "$revision" == "$prev_revision" ]]; then
+    # Abort if revisions match
+    echo "The revisions match. Nothing to do, aborting checkout..."
+    return
+  fi
+  
   # Checkout the specific revision after fetch or for older branches, run
   # setup_links.py to replace all directories which now must be symlinks then
   # try again.
@@ -162,6 +180,7 @@ function checkout() {
     (test -f src/setup_links.py && src/setup_links.py --force --no-prompt && gclient sync --force --revision $revision)
   # Cache the target OS
   echo $target_os > $outdir/.webrtcbuilds_target_os
+  echo $revision > $outdir/.webrtcbuilds_revision
   popd >/dev/null
 }
 
@@ -174,6 +193,22 @@ function patch() {
   local outdir="$2"
   local rtti_enabled="$3"
 
+  pushd $outdir/src/build >/dev/null
+  
+  # The next patches switch to building with the default libc++ from the NDK instead of 
+  # the libc++ version that ships with WebRTC. Otherwise linking to libs built with 
+  # the Android NDK will not work.
+  
+  # reset any changes that might have been made previously
+  git reset --hard
+  
+  # apply the patches
+  git apply $outdir/../build_config.patch
+  
+  popd >/dev/null
+  
+  # apply the rest of the patches
+  
   pushd $outdir/src >/dev/null
   # This removes the examples from being built.
   sed -i.bak 's|"//webrtc/examples",|#"//webrtc/examples",|' BUILD.gn
@@ -181,6 +216,24 @@ function patch() {
   [ "$rtti_enabled" = 1 ] && sed -i.bak \
     's|"//build/config/compiler:no_rtti",|"//build/config/compiler:rtti",|' \
     build/config/BUILDCONFIG.gn
+  [ "$rtti_enabled" = 1 ] && sed -i.bak \
+    's|"//build/config/compiler:no_rtti",|"//build/config/compiler:rtti",|' \
+    third_party/icu/BUILD.gn
+  [ "$rtti_enabled" = 1 ] && sed -i.bak \
+    's|"//build/config/compiler:no_rtti",|"//build/config/compiler:rtti",|' \
+    buildtools/third_party/libc++/BUILD.gn
+  [ "$rtti_enabled" = 1 ] && sed -i.bak \
+    's|"//build/config/compiler:no_rtti",|"//build/config/compiler:rtti",|' \
+    buildtools/third_party/libc++abi/BUILD.gn
+  [ "$rtti_enabled" = 1 ] && sed -i.bak \
+    's|"//build/config/compiler:no_rtti"|"//build/config/compiler:rtti"|' \
+    third_party/breakpad/BUILD.gn
+  
+  # Switch to NDK API level 21 (Android 5.0) also for 32bit builds
+  sed -i.bak \
+    's|android32_ndk_api_level = 16|android32_ndk_api_level = 21|' \
+    .gn
+	
   popd >/dev/null
 }
 
@@ -232,12 +285,30 @@ device_info_external.obj"
 function compile-unix() {
   local outputdir="$1"
   local gn_args="$2"
-  local blacklist="unittest|examples|/yasm|protobuf_lite|main.o|\
-video_capture_external.o|device_info_external.o"
+  #local blacklist="unittest|examples|/yasm|protobuf_lite|main.o|video_capture_external.o|device_info_external.o"
+  local blacklist="clang_x64|unittest|examples|/yasm|video_capture_external.o|device_info_external.o"
+  local target_os="$3"
+  local target_cpu="$4"
+  local ninja_args="$5"
+  
+  if [ $target_os = 'android' ]; then
+    if [ $target_cpu = 'arm' ]; then
+	  AR='../../third_party/android_ndk/toolchains/arm-linux-androideabi-4.9/prebuilt/linux-x86_64/bin/arm-linux-androideabi-ar'
+	  RANLIB='../../third_party/android_ndk/toolchains/arm-linux-androideabi-4.9/prebuilt/linux-x86_64/bin/arm-linux-androideabi-ranlib'
+	else
+	  AR='../../third_party/android_ndk/toolchains/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin/aarch64-linux-android-ar'
+	  RANLIB='../../third_party/android_ndk/toolchains/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin/aarch64-linux-android-ranlib'
+	fi
+  else
+    AR='ar'
+    RANLIB='ranlib'
+  fi
+
+  echo "Using AR=$AR and RANLIB=$RANLIB"
 
   gn gen $outputdir --args="$gn_args"
   pushd $outputdir >/dev/null
-  ninja -C .
+  ninja -v -C . $ninja_args
 
   rm -f libwebrtc_full.a
   # Produce an ordered objects list by parsing .ninja_deps for strings
@@ -247,13 +318,12 @@ video_capture_external.o|device_info_external.o"
   # various intrinsics aren't included by default in .ninja_deps
   local extras=$(find \
     ./obj/third_party/libvpx/libvpx_* \
-    ./obj/third_party/libjpeg_turbo/simd_asm \
     ./obj/third_party/boringssl/boringssl_asm -name '*.o')
   echo "$extras" | tr ' ' '\n' >>libwebrtc_full.list
   # generate the archive
-  cat libwebrtc_full.list | xargs ar -crs libwebrtc_full.a
+  cat libwebrtc_full.list | xargs $AR -crs libwebrtc_full.a
   # generate an index list
-  ranlib libwebrtc_full.a
+  $RANLIB libwebrtc_full.a
   popd >/dev/null
 }
 
@@ -273,6 +343,7 @@ function compile() {
   local disable_iterator_debug="$6"
   local common_args="is_component_build=false rtc_include_tests=false treat_warnings_as_errors=false"
   local target_args="target_os=\"$target_os\" target_cpu=\"$target_cpu\""
+  local ninja_args=""
 
   [ "$disable_iterator_debug" = 1 ] && common_args+=' enable_iterator_debugging=false'
   pushd $outdir/src >/dev/null
@@ -293,11 +364,18 @@ function compile() {
       if [[ $platform = 'linux' && $target_os != 'android' && $target_cpu != amd* ]]; then
         target_args+=" is_clang=false use_sysroot=false"
       fi
+	  
+	  if [[ $target_os = 'android' ]]; then
+	    target_args+=" use_custom_libcxx=false"
+		#ninja_args="sdk/android:libwebrtc sdk/android:libjingle_peerconnection_so sdk/android:native_api"
+	  fi
+	  
+	  echo "Building with target arguments $target_args, ninja arguments $ninja_args"
 
       # Debug builds are component builds (shared libraries) by default unless
       # is_component_build=false is passed to gn gen --args. Release builds are
       # static by default.
-      compile-unix "out/$cfg" "$common_args $target_args"
+      compile-unix "out/${cfg}_${target_cpu}" "$common_args $target_args" "$target_os" "$target_cpu" "$ninja_args"
       ;;
     esac
   done
@@ -318,6 +396,7 @@ function package::prepare() {
   local resourcedir="$4"
   local configs="$5"
   local revision_number="$6"
+  local target_os="$7"
 
   if [ $platform = 'mac' ]; then
     CP='gcp'
@@ -350,10 +429,16 @@ function package::prepare() {
     popd >/dev/null
   fi
   popd >/dev/null
+  
   # find and copy libraries
   pushd src/out >/dev/null
-  find . -maxdepth 3 \( -name '*.so' -o -name '*.dll' -o -name '*webrtc_full*' -o -name *.jar \) \
-    -exec $CP --parents '{}' $outdir/$package_filename/lib ';'
+  if [[ $target_os = 'android' ]]; then
+    find . \( -name '*.so' -o -name '*.dll' -o -name '*webrtc_full*' -o -name libwebrtc.jar \) \
+      -exec $CP --parents '{}' $outdir/$package_filename/lib ';'
+  else
+    find . -maxdepth 3 \( -name '*.so' -o -name '*.dll' -o -name '*webrtc_full*' -o -name *.jar \) \
+      -exec $CP --parents '{}' $outdir/$package_filename/lib ';'
+  fi
   popd >/dev/null
 
   # for linux, add pkgconfig files

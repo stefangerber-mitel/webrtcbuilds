@@ -206,6 +206,17 @@ function patch() {
   git apply $outdir/../build_config.patch
   
   popd >/dev/null
+
+  # Additional patch for /src/buildtools
+  pushd $outdir/src/buildtools >/dev/null
+
+  # reset any changes that might have been made previously
+  git reset --hard
+
+  # apply the patches
+  git apply $outdir/../buildtools.patch
+
+  popd >/dev/null
   
   # apply the rest of the patches
   
@@ -229,9 +240,9 @@ function patch() {
     's|"//build/config/compiler:no_rtti"|"//build/config/compiler:rtti"|' \
     third_party/breakpad/BUILD.gn
   
-  # Switch to NDK API level 21 (Android 5.0) also for 32bit builds
+  # Switch to NDK API level 23 (Android 6.0) also for 32bit builds
   sed -i.bak \
-    's|android32_ndk_api_level = 16|android32_ndk_api_level = 21|' \
+    's|android32_ndk_api_level = 16|android32_ndk_api_level = 23|' \
     .gn
 	
   popd >/dev/null
@@ -286,19 +297,15 @@ function compile-unix() {
   local outputdir="$1"
   local gn_args="$2"
   #local blacklist="unittest|examples|/yasm|protobuf_lite|main.o|video_capture_external.o|device_info_external.o"
-  local blacklist="clang_x64|unittest|examples|/yasm|video_capture_external.o|device_info_external.o"
+  #local blacklist="clang_x64|unittest|examples|/yasm|video_capture_external.o|device_info_external.o|catapult|/test/"
+  local blacklist="clang_x64|unittest|examples|/yasm|video_capture_external.o|device_info_external.o|/test/"
   local target_os="$3"
   local target_cpu="$4"
   local ninja_args="$5"
   
   if [ $target_os = 'android' ]; then
-    if [ $target_cpu = 'arm' ]; then
-	  AR='../../third_party/android_ndk/toolchains/arm-linux-androideabi-4.9/prebuilt/linux-x86_64/bin/arm-linux-androideabi-ar'
-	  RANLIB='../../third_party/android_ndk/toolchains/arm-linux-androideabi-4.9/prebuilt/linux-x86_64/bin/arm-linux-androideabi-ranlib'
-	else
-	  AR='../../third_party/android_ndk/toolchains/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin/aarch64-linux-android-ar'
-	  RANLIB='../../third_party/android_ndk/toolchains/aarch64-linux-android-4.9/prebuilt/linux-x86_64/bin/aarch64-linux-android-ranlib'
-	fi
+    AR='../../third_party/android_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar'
+    RANLIB='../../third_party/android_ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ranlib'
   else
     AR='ar'
     RANLIB='ranlib'
@@ -318,10 +325,11 @@ function compile-unix() {
   # various intrinsics aren't included by default in .ninja_deps
   local extras=$(find \
     ./obj/third_party/libvpx/libvpx_* \
-    ./obj/third_party/boringssl/boringssl_asm -name '*.o')
+    ./obj/third_party/boringssl/boringssl_asm \
+    ./obj/third_party/libaom/libaom_nasm -name '*.o')
   echo "$extras" | tr ' ' '\n' >>libwebrtc_full.list
   # generate the archive
-  cat libwebrtc_full.list | xargs $AR -crs libwebrtc_full.a
+  cat libwebrtc_full.list | xargs $AR -crsvP libwebrtc_full.a
   # generate an index list
   $RANLIB libwebrtc_full.a
   popd >/dev/null
@@ -342,6 +350,7 @@ function compile() {
   local configs="$5"
   local disable_iterator_debug="$6"
   local common_args="is_component_build=false rtc_include_tests=false treat_warnings_as_errors=false"
+#  local common_args="is_component_build=false rtc_include_tests=false treat_warnings_as_errors=false rtc_include_builtin_video_codecs=true rtc_include_builtin_audio_codecs=true"
   local target_args="target_os=\"$target_os\" target_cpu=\"$target_cpu\""
   local ninja_args=""
 

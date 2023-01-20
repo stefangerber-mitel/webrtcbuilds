@@ -326,7 +326,8 @@ function compile-unix() {
   local extras=$(find \
     ./obj/third_party/libvpx/libvpx_* \
     ./obj/third_party/boringssl/boringssl_asm \
-    ./obj/third_party/libaom/libaom_nasm -name '*.o')
+    ./obj/third_party/libaom/libaom_nasm \
+    ./obj/third_party/dav1d/dav1d_asm -name '*.o')
   echo "$extras" | tr ' ' '\n' >>libwebrtc_full.list
   # generate the archive
   cat libwebrtc_full.list | xargs $AR -crsvP libwebrtc_full.a
